@@ -4,10 +4,9 @@ import hashlib
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import datetime
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright
-
+from datetime import datetime
 
 # =========================
 # CONFIG
@@ -18,121 +17,118 @@ URLS = [
     "https://www.essex.ac.uk/international/educational-representatives",
     "https://www.gold.ac.uk/international/representatives/list/",
     "https://www.hud.ac.uk/international/applying-to-the-university/approved-education-agents/",
-    "https://www.beds.ac.uk/media/krmpi32p/overseas-agent-list_apr26.pdf",
-    "https://www.aru.ac.uk/international/information-by-world-region",
-    "https://www.worcester.ac.uk/study/International/local-representatives-near-you.aspx",
-    "https://www.lancashire.ac.uk/international-students/country"
 ]
 
-LOGO_DIR = r"E:\Soykot\Scraping\crawler\logo"
+LOGO_DIR = "logos"
 os.makedirs(LOGO_DIR, exist_ok=True)
 
-DOWNLOADED_LOGOS = {}
+CACHE = {}
+VISITED_AGENTS = {}
 
-SERVICES = [
-    "course_selection",
-    "application_support",
-    "visa_guidance",
-    "counselling",
-    "scholarship_guidance"
-]
+# =========================
+# FETCH (FIXED - NO HANG)
+# =========================
+
+def fetch(url):
+
+    browser = None
+
+    try:
+        with sync_playwright() as p:
+
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
+            )
+
+            page = browser.new_page()
+
+            page.set_default_navigation_timeout(30000)
+            page.set_default_timeout(30000)
+
+            print(f"   Loading page...")
+
+            page.goto(url, wait_until="domcontentloaded")
+
+            page.wait_for_timeout(2000)
+
+            html = page.content()
+
+            return html
+
+    except Exception as e:
+        print(f"[FETCH ERROR] {url} -> {e}")
+        return ""
+
+    finally:
+        if browser:
+            browser.close()
 
 
 # =========================
-# UTILITIES
+# UTIL
 # =========================
 
 def clean(t):
-    return re.sub(r"\s+", " ", (t or "")).strip()
+    return re.sub(r"\s+", " ", t or "").strip()
 
 
-def extract_emails(t):
-    return list(set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", t or "")))
+def hash_id(t):
+    return hashlib.md5(t.encode()).hexdigest()[:10]
 
 
-def generate_id(text):
-    return hashlib.md5(text.encode()).hexdigest()[:12]
+def extract_emails(text):
+    return list(set(re.findall(
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        text or ""
+    )))
+
+
+def extract_phones(text):
+    phones = re.findall(
+        r"(?:\+\d{1,3}[\s\-]?)?(?:\(?\d+\)?[\s\-]?){6,}",
+        text or ""
+    )
+
+    return list(set([
+        p.strip()
+        for p in phones
+        if len(re.sub(r"\D", "", p)) >= 8
+    ]))
 
 
 # =========================
-# FETCH HTML
+# LOGO EXTRACT
 # =========================
 
-def fetch_html(url):
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, timeout=90000)
-        page.wait_for_timeout(3500)
-        html = page.content()
-        browser.close()
-        return html
+def extract_site_logo(soup, base_url):
 
+    selectors = [
+        ".logo img",
+        "#logo img",
+        ".navbar-brand img",
+        ".site-logo img",
+        "header img"
+    ]
 
-# =========================
-# SMART LOGO DETECTOR (FIXED)
-# =========================
-
-def extract_logo_url(soup, base_url):
-
-    # 1. OpenGraph (highest priority)
-    og = soup.find("meta", property="og:image")
-    if og and og.get("content"):
-        return urljoin(base_url, og["content"])
-
-    # 2. Twitter card
-    tw = soup.find("meta", property="twitter:image")
-    if tw and tw.get("content"):
-        return urljoin(base_url, tw["content"])
-
-    candidates = []
-
-    # 3. DOM-based logo detection
-    for img in soup.find_all("img"):
-
-        src = (
-            img.get("src")
-            or img.get("data-src")
-            or img.get("data-original")
-            or img.get("data-lazy")
-            or ""
-        )
-
-        if not src:
-            continue
-
-        alt = (img.get("alt") or "").lower()
-        cls = " ".join(img.get("class", [])).lower()
-
-        score = 0
-
-        # strong signals for logos
-        if "logo" in src.lower(): score += 6
-        if "logo" in alt: score += 6
-        if "logo" in cls: score += 6
-
-        # avoid wrong images
-        if "banner" in src.lower(): score -= 5
-        if "hero" in src.lower(): score -= 5
-        if "header" in src.lower(): score -= 2
-        if "social" in src.lower(): score -= 3
-
-        # file type preference
-        if src.endswith(".svg"): score += 2
-        if src.endswith(".png"): score += 1
-
-        if score >= 6:
-            candidates.append((score, urljoin(base_url, src)))
-
-    if candidates:
-        candidates.sort(reverse=True)
-        return candidates[0][1]
+    for sel in selectors:
+        try:
+            img = soup.select_one(sel)
+            if img:
+                src = img.get("src") or img.get("data-src")
+                if src:
+                    return urljoin(base_url, src)
+        except:
+            pass
 
     return None
 
 
 # =========================
-# LOGO DOWNLOADER (CLEAN + SAFE)
+# DOWNLOAD LOGO
 # =========================
 
 def download_logo(url, name):
@@ -140,131 +136,167 @@ def download_logo(url, name):
     if not url:
         return ""
 
-    if url in DOWNLOADED_LOGOS:
-        return DOWNLOADED_LOGOS[url]
+    if url in CACHE:
+        return CACHE[url]
 
     try:
-        filename = f"{generate_id(name)}.png"
-        path = os.path.join(LOGO_DIR, filename)
-
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "image/*,*/*;q=0.8"
-        }
-
-        r = requests.get(url, headers=headers, timeout=20)
-
-        print(f"[LOGO] {url} -> {r.status_code}")
+        r = requests.get(url, timeout=20)
 
         if r.status_code != 200:
             return ""
 
-        if len(r.content) < 2000:
-            return ""
+        ext = ".png"
+
+        ctype = r.headers.get("Content-Type", "").lower()
+
+        if "svg" in ctype:
+            ext = ".svg"
+        elif "jpeg" in ctype or "jpg" in ctype:
+            ext = ".jpg"
+        elif "webp" in ctype:
+            ext = ".webp"
+
+        path = os.path.join(LOGO_DIR, f"{hash_id(name)}{ext}")
 
         with open(path, "wb") as f:
             f.write(r.content)
 
-        DOWNLOADED_LOGOS[url] = path
+        CACHE[url] = path
+
         return path
 
-    except Exception as e:
-        print("[ERROR] logo download:", e)
-
-    return ""
+    except:
+        return ""
 
 
 # =========================
-# UNIVERSITY DETECTION
+# AGENT EXTRACTION
 # =========================
 
-def infer_university(url, soup):
+def extract_agents(soup, base_url):
 
-    domain = urlparse(url).netloc
+    agents = []
 
-    mapping = {
-        "shu.ac.uk": "Sheffield Hallam University",
-        "essex.ac.uk": "University of Essex",
-        "gold.ac.uk": "Goldsmiths University of London",
-        "hud.ac.uk": "University of Huddersfield",
-        "beds.ac.uk": "University of Bedfordshire",
-        "aru.ac.uk": "Anglia Ruskin University",
-        "worcester.ac.uk": "University of Worcester",
-        "lancashire.ac.uk": "University of Central Lancashire",
-    }
+    for a in soup.find_all("a"):
 
-    for k, v in mapping.items():
-        if k in domain:
-            return v
+        name = clean(a.get_text())
+        href = a.get("href")
 
-    return soup.title.string.strip() if soup.title else "Unknown University"
+        if not href or len(name) < 3 or len(name) > 100:
+            continue
 
+        full_url = urljoin(base_url, href)
 
-# =========================
-# BLOCK EXTRACTION
-# =========================
+        if any(x in full_url.lower() for x in [
+            "mailto", "javascript", "#", "login", "contact"
+        ]):
+            continue
 
-def extract_blocks(soup):
-    blocks = []
-    for tag in soup.find_all(["tr", "li", "div", "p"]):
-        txt = clean(tag.get_text(" "))
-        if len(txt) > 30:
-            blocks.append(txt)
-    return blocks
+        if name.lower() in ["home", "about", "contact", "menu"]:
+            continue
 
+        if not any(k in name.lower() for k in [
+            "agent", "education", "consult", "study", "international"
+        ]):
+            continue
 
-# =========================
-# AGENT NAME
-# =========================
+        agents.append({
+            "agent_name": name,
+            "agent_url": full_url
+        })
 
-def extract_agent_name(text):
+    # remove duplicates
+    seen = set()
+    out = []
 
-    emails = extract_emails(text)
+    for a in agents:
+        key = (a["agent_name"], a["agent_url"])
+        if key not in seen:
+            seen.add(key)
+            out.append(a)
 
-    if emails:
-        domain = emails[0].split("@")[-1]
-        if "idp" in domain:
-            return "IDP Education"
-        if "si-uk" in domain:
-            return "SI-UK Education Council"
-
-    return "Unknown Agent"
+    return out
 
 
 # =========================
-# SCRAPER
+# AGENT WEBSITE SCRAPE
+# =========================
+
+def scrape_agent_site(url):
+
+    if url in VISITED_AGENTS:
+        return VISITED_AGENTS[url]
+
+    try:
+        html = fetch(url)
+
+        if not html:
+            return {"emails": [], "phones": [], "logo_url": None}
+
+        soup = BeautifulSoup(html, "lxml")
+
+        text = soup.get_text(" ", strip=True)
+
+        emails = extract_emails(text)
+        phones = extract_phones(text)
+
+        logo_url = extract_site_logo(soup, url)
+
+        data = {
+            "emails": emails,
+            "phones": phones,
+            "logo_url": logo_url
+        }
+
+        VISITED_AGENTS[url] = data
+
+        return data
+
+    except:
+        return {"emails": [], "phones": [], "logo_url": None}
+
+
+# =========================
+# SCRAPE UNIVERSITY
 # =========================
 
 def scrape(url):
 
     print("\nScraping:", url)
 
-    html = fetch_html(url)
+    html = fetch(url)
+
+    if not html:
+        print("   EMPTY PAGE SKIPPED")
+        return []
+
     soup = BeautifulSoup(html, "lxml")
 
-    university = infer_university(url, soup)
-    blocks = extract_blocks(soup)
+    agents = extract_agents(soup, url)
 
-    logo_url = extract_logo_url(soup, url)
-    print("LOGO FOUND:", logo_url)
-
-    # IMPORTANT: download ONLY ONCE per page
-    logo_path = download_logo(logo_url, university)
+    print(f"   Agents found: {len(agents)}")
 
     results = []
 
-    for b in blocks:
+    for a in agents:
+
+        print("   Agent:", a["agent_name"])
+
+        contact = scrape_agent_site(a["agent_url"])
+
+        logo_path = download_logo(
+            contact["logo_url"],
+            a["agent_name"]
+        )
 
         results.append({
-            "university": university,
-            "website": url,
-            "agent_name": extract_agent_name(b),
-            "emails": extract_emails(b),
-
-            "logo_url": logo_url,
+            "agent_name": a["agent_name"],
+            "agent_url": a["agent_url"],
+            "emails": "; ".join(contact["emails"]),
+            "phones": "; ".join(contact["phones"]),
+            "logo_url": contact["logo_url"],
             "logo_path": logo_path,
-
-            "notes": b[:200],
+            "source": url,
             "last_updated": datetime.today().strftime("%Y-%m-%d")
         })
 
@@ -272,7 +304,7 @@ def scrape(url):
 
 
 # =========================
-# PIPELINE
+# RUN
 # =========================
 
 def run():
@@ -280,14 +312,20 @@ def run():
     all_data = []
 
     for url in URLS:
+        print("\n========================")
+        print("START:", url)
+
         try:
-            all_data.extend(scrape(url))
+            data = scrape(url)
+            all_data.extend(data)
         except Exception as e:
-            print("Error:", url, e)
+            print("FAILED:", url, e)
+
+        print("DONE:", url)
 
     df = pd.DataFrame(all_data)
 
-    df.drop_duplicates(subset=["agent_name", "website"], inplace=True)
+    df.drop_duplicates(subset=["agent_name", "agent_url"], inplace=True)
 
     return df
 
@@ -297,7 +335,7 @@ def run():
 # =========================
 
 def export(df):
-    out = "agents_master_final_v4.csv"
+    out = "agents_final_fixed.csv"
     df.to_csv(out, index=False)
     print("\nSaved:", out)
 

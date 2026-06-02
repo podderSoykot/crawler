@@ -17,6 +17,10 @@ URLS = [
     "https://www.essex.ac.uk/international/educational-representatives",
     "https://www.gold.ac.uk/international/representatives/list/",
     "https://www.hud.ac.uk/international/applying-to-the-university/approved-education-agents/",
+    "https://www.beds.ac.uk/media/krmpi32p/overseas-agent-list_apr26.pdf",
+    "https://www.aru.ac.uk/international/information-by-world-region",
+    "https://www.worcester.ac.uk/study/International/local-representatives-near-you.aspx",
+    "https://www.lancashire.ac.uk/international-students/country"
 ]
 
 LOGO_DIR = "logos"
@@ -26,47 +30,27 @@ CACHE = {}
 VISITED_AGENTS = {}
 
 # =========================
-# FETCH (FIXED - NO HANG)
+# PLAYWRIGHT (SAFE INIT)
+# =========================
+
+playwright = sync_playwright().start()
+browser = playwright.chromium.launch(headless=True)
+context = browser.new_context()
+
+# =========================
+# FETCH PAGE
 # =========================
 
 def fetch(url):
-
-    browser = None
-
     try:
-        with sync_playwright() as p:
-
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage"
-                ]
-            )
-
-            page = browser.new_page()
-
-            page.set_default_navigation_timeout(30000)
-            page.set_default_timeout(30000)
-
-            print(f"   Loading page...")
-
-            page.goto(url, wait_until="domcontentloaded")
-
-            page.wait_for_timeout(2000)
-
-            html = page.content()
-
-            return html
-
-    except Exception as e:
-        print(f"[FETCH ERROR] {url} -> {e}")
+        page = context.new_page()
+        page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        html = page.content()
+        page.close()
+        return html
+    except:
         return ""
-
-    finally:
-        if browser:
-            browser.close()
-
 
 # =========================
 # UTIL
@@ -101,10 +85,10 @@ def extract_phones(text):
 
 
 # =========================
-# LOGO EXTRACT
+# LOGO EXTRACTION
 # =========================
 
-def extract_site_logo(soup, base_url):
+def extract_logo(soup, base_url):
 
     selectors = [
         ".logo img",
@@ -127,10 +111,6 @@ def extract_site_logo(soup, base_url):
     return None
 
 
-# =========================
-# DOWNLOAD LOGO
-# =========================
-
 def download_logo(url, name):
 
     if not url:
@@ -145,13 +125,12 @@ def download_logo(url, name):
         if r.status_code != 200:
             return ""
 
-        ext = ".png"
-
         ctype = r.headers.get("Content-Type", "").lower()
 
+        ext = ".png"
         if "svg" in ctype:
             ext = ".svg"
-        elif "jpeg" in ctype or "jpg" in ctype:
+        elif "jpg" in ctype or "jpeg" in ctype:
             ext = ".jpg"
         elif "webp" in ctype:
             ext = ".webp"
@@ -162,7 +141,6 @@ def download_logo(url, name):
             f.write(r.content)
 
         CACHE[url] = path
-
         return path
 
     except:
@@ -170,7 +148,7 @@ def download_logo(url, name):
 
 
 # =========================
-# AGENT EXTRACTION
+# STEP 1: UNIVERSITY → AGENTS
 # =========================
 
 def extract_agents(soup, base_url):
@@ -182,13 +160,13 @@ def extract_agents(soup, base_url):
         name = clean(a.get_text())
         href = a.get("href")
 
-        if not href or len(name) < 3 or len(name) > 100:
+        if not href or len(name) < 3:
             continue
 
         full_url = urljoin(base_url, href)
 
         if any(x in full_url.lower() for x in [
-            "mailto", "javascript", "#", "login", "contact"
+            "mailto", "javascript", "#"
         ]):
             continue
 
@@ -205,7 +183,7 @@ def extract_agents(soup, base_url):
             "agent_url": full_url
         })
 
-    # remove duplicates
+    # dedupe
     seen = set()
     out = []
 
@@ -219,7 +197,7 @@ def extract_agents(soup, base_url):
 
 
 # =========================
-# AGENT WEBSITE SCRAPE
+# STEP 2: AGENT WEBSITE SCRAPER
 # =========================
 
 def scrape_agent_site(url):
@@ -237,19 +215,13 @@ def scrape_agent_site(url):
 
         text = soup.get_text(" ", strip=True)
 
-        emails = extract_emails(text)
-        phones = extract_phones(text)
-
-        logo_url = extract_site_logo(soup, url)
-
         data = {
-            "emails": emails,
-            "phones": phones,
-            "logo_url": logo_url
+            "emails": extract_emails(text),
+            "phones": extract_phones(text),
+            "logo_url": extract_logo(soup, url)
         }
 
         VISITED_AGENTS[url] = data
-
         return data
 
     except:
@@ -257,7 +229,7 @@ def scrape_agent_site(url):
 
 
 # =========================
-# SCRAPE UNIVERSITY
+# MAIN SCRAPER
 # =========================
 
 def scrape(url):
@@ -267,20 +239,19 @@ def scrape(url):
     html = fetch(url)
 
     if not html:
-        print("   EMPTY PAGE SKIPPED")
         return []
 
     soup = BeautifulSoup(html, "lxml")
 
     agents = extract_agents(soup, url)
 
-    print(f"   Agents found: {len(agents)}")
+    print("Agents found:", len(agents))
 
     results = []
 
     for a in agents:
 
-        print("   Agent:", a["agent_name"])
+        print("  -> Agent:", a["agent_name"])
 
         contact = scrape_agent_site(a["agent_url"])
 
@@ -292,10 +263,13 @@ def scrape(url):
         results.append({
             "agent_name": a["agent_name"],
             "agent_url": a["agent_url"],
+
             "emails": "; ".join(contact["emails"]),
             "phones": "; ".join(contact["phones"]),
+
             "logo_url": contact["logo_url"],
             "logo_path": logo_path,
+
             "source": url,
             "last_updated": datetime.today().strftime("%Y-%m-%d")
         })
@@ -304,7 +278,7 @@ def scrape(url):
 
 
 # =========================
-# RUN
+# RUN PIPELINE
 # =========================
 
 def run():
@@ -316,18 +290,13 @@ def run():
         print("START:", url)
 
         try:
-            data = scrape(url)
-            all_data.extend(data)
+            all_data.extend(scrape(url))
         except Exception as e:
             print("FAILED:", url, e)
 
         print("DONE:", url)
 
-    df = pd.DataFrame(all_data)
-
-    df.drop_duplicates(subset=["agent_name", "agent_url"], inplace=True)
-
-    return df
+    return pd.DataFrame(all_data)
 
 
 # =========================
@@ -335,15 +304,28 @@ def run():
 # =========================
 
 def export(df):
-    out = "agents_final_fixed.csv"
-    df.to_csv(out, index=False)
-    print("\nSaved:", out)
+
+    df.drop_duplicates(
+        subset=["agent_name", "agent_url"],
+        inplace=True
+    )
+
+    df.to_csv("agents_final_v5.csv", index=False)
+
+    print("\nSaved: agents_final_v5.csv")
 
 
 # =========================
-# MAIN
+# CLEAN EXIT
 # =========================
 
 if __name__ == "__main__":
-    df = run()
-    export(df)
+
+    try:
+        df = run()
+        export(df)
+
+    finally:
+        context.close()
+        browser.close()
+        playwright.stop()

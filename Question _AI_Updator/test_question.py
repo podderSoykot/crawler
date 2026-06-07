@@ -1,6 +1,7 @@
 from app.pipelines.update_pipeline import UpdatePipeline
 
-question = "who is the current most richest person in the world"
+#question = "who is the current most richest person in the world"
+question = "World FiFA Ranking 2026 bangladesh rank?"
 pipeline = UpdatePipeline()
 result = pipeline.process_question(question)
 

@@ -3,9 +3,18 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-DATABASE_URL = "sqlite:///./questions.db"
+from config import get_settings
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+settings = get_settings()
+
+engine = create_engine(
+    settings.sqlalchemy_database_url,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    pool_size=10,
+    max_overflow=20,
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

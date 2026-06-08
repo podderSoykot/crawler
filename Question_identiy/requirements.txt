@@ -1,5 +1,7 @@
 fastapi
 uvicorn
 sqlalchemy
-bs4
+pymysql
 pydantic
+pydantic-settings
+bs4

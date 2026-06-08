@@ -1,6 +1,5 @@
-fastapi 
-uvicorn 
-pandas 
-openpyxl 
-sqlalchemy 
+fastapi
+uvicorn
+sqlalchemy
 bs4
+pydantic
